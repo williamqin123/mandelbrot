@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Mandelbrot Zoom</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #box-container {
+      width: 100%;
+      max-width: 100vh;
+      position: relative;
+    }
+    #inner-spacer {
+      padding-top: 100%;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+      border: none;
+    }
+  </style>
+
+  <script src='https://twgljs.org/dist/4.x/twgl.min.js'></script>
+
+  <script id="vshader" type="x-shader/x-vertex">
+      attribute vec4 v_position;
+
+      void main() {
+        gl_Position = v_position;
+      }
+  </script>
+
+  <script id="fshader" type="x-shader/x-fragment">
+    #if __VERSION__ < 130
+    #define TEXTURE2D texture2D
+    #else
+    #define TEXTURE2D texture
+    #endif
+
+    precision highp float;
+
+    uniform sampler2D tex;
+
+    uniform float zoom;
+    uniform vec2 point;
+    uniform vec2 resolution;
+    uniform bool highQuality;
+
+    float correctedZoom = log2(zoom * 4.0);
+
+    const float maxIterations = 2048.0;
+    const float minIterations = 32.0;
+    const float defaultIterations = 128.0;
+    float baseIterations = (highQuality ? 2.0 : 1.0) * defaultIterations;
+
+    float adaptedIterations = min(max(baseIterations + (correctedZoom > 0.0 ? (pow(0.5 * correctedZoom + 1.0, 2.0) - 0.5) : (-log(1.0 - correctedZoom))) * sqrt(baseIterations), minIterations), maxIterations);
+    float lowResAdaptedIterations = min(max(defaultIterations + (correctedZoom > 0.0 ? (pow(0.5 * correctedZoom + 1.0, 2.0) - 0.5) : (-log(1.0 - correctedZoom))) * sqrt(defaultIterations), minIterations), maxIterations);
+
+    float power(float base, int exponent) {
+      float a = 1.0;
+      for (int b = 0; b < 4; b++) {
+        a *= base;
+        if (b >= exponent - 1) break;
+      }
+      return a;
+    }
+
+    vec2 squaredComplex(vec2 c) {
+      return vec2(c.x*c.x - c.y*c.y, 2.0 * c.x * c.y);
+    }
+
+    float absComplex(vec2 c) {
+      return sqrt(c.x*c.x + c.y*c.y);
+    }
+
+
+    vec4 iteratePixel(vec2 position) {
+      vec2 z = vec2(0.0);
+      for (float n = 1.0; n <= maxIterations; n += 1.0) {
+        if (n > adaptedIterations) break;
+
+        if (absComplex(z) > max(sqrt(pow(0.5 / zoom + abs(point.x), 2.0) + pow(0.5 / zoom + abs(point.y), 2.0)), highQuality? 4.0 : 3.0)) {
+
+          float smoothed = min(max(0.0, (n - log(log(absComplex(z))) / log(2.0)) / lowResAdaptedIterations - 0.001), 1.0);
+          float transformed = (pow(smoothed, 1.0 / 3.0) + smoothed*smoothed*smoothed - 3.0 * smoothed*smoothed + 3.0 * smoothed) / 2.0;
+
+          vec4 color = texture2D(tex, vec2(transformed, 0.0));
+
+          return true ? pow(color, vec4(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2, 1.0)) : color;
+        }
+        z = squaredComplex(z) + position;
+      }
+      return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    void main() {
+      vec2 uv = gl_FragCoord.xy / resolution;
+      vec2 ab = vec2(uv.x - 0.5, uv.y - 0.5);
+      gl_FragColor = highQuality ? pow((
+        iteratePixel((ab + vec2(-0.33, -0.33) / resolution) / zoom + point) +
+        iteratePixel((ab + vec2(0.33, -0.33) / resolution) / zoom + point) +
+        iteratePixel((ab + vec2(-0.33, 0.33) / resolution) / zoom + point) +
+        iteratePixel((ab + vec2(0.33, 0.33) / resolution) / zoom + point) +
+        iteratePixel(ab / zoom + point)/* +
+        iteratePixel((ab + vec2(-0.33, 0.0) / resolution) / zoom + point) +
+        iteratePixel((ab + vec2(0.33, 0.0) / resolution) / zoom + point) +
+        iteratePixel((ab + vec2(0.0, 0.33) / resolution) / zoom + point) +
+        iteratePixel((ab + vec2(0.0, -0.33) / resolution) / zoom + point)*/
+      ) / 5.0, vec4(2.2, 2.2, 2.2, 1.0))
+      : pow(iteratePixel(ab / zoom + point), vec4(2.2, 2.2, 2.2, 1.0));
+    }
+  </script>
+
+  <script>
+    window.addEventListener('load', function() {
+      var g = {};
+      var gl;
+      var canvas;
+
+      var zoomFactor = -2;
+      var point = [-0.75, 0];
+
+      g.zoomRange = [-5, 0];
+
+      const $ = (x) => document.querySelector(x);
+
+      function init() {
+          g.dragging = false;
+
+          canvas = document.querySelector('canvas');
+          gl = canvas.getContext('webgl2');
+          if (!gl) return;
+
+          g.program = twgl.createProgram(gl, [$('#vshader').innerText, $('#fshader').innerText]);
+          gl.useProgram(g.program);
+          var vertexPositionAttribute = gl.getAttribLocation(g.program, "v_position");
+          var quad_vertex_buffer = gl.createBuffer();
+          var quad_vertex_buffer_data = new Float32Array([ 
+              -1.0, -1.0, 0.0,
+               1.0, -1.0, 0.0,
+              -1.0,  1.0, 0.0,
+              -1.0,  1.0, 0.0,
+               1.0, -1.0, 0.0,
+               1.0,  1.0, 0.0]);
+          gl.bindBuffer(gl.ARRAY_BUFFER, quad_vertex_buffer);
+          gl.bufferData(gl.ARRAY_BUFFER, quad_vertex_buffer_data, gl.STATIC_DRAW);
+          gl.vertexAttribPointer(vertexPositionAttribute, 3, gl.FLOAT, false, 0, 0);
+          gl.enableVertexAttribArray(vertexPositionAttribute);
+
+          var textureImg = document.querySelector('#texture');
+          var texture = gl.createTexture();
+
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textureImg);
+
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+          resize();
+          beginDraw();
+      }
+
+      g.delay = 250;
+      g.fastRendering = false;
+
+      function draw() {
+        let delta = Date.now() - g.startTime;
+
+        let isFinalFrame = delta >= g.delay;
+
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        if (isFinalFrame && window.devicePixelRatio !== 1) {
+          resize({correction:true});
+        }
+
+        gl.uniform1f(gl.getUniformLocation(g.program, 'zoom'), 2**zoomFactor);
+        gl.uniform2f(gl.getUniformLocation(g.program, 'point'), ...point);
+        gl.uniform2f(gl.getUniformLocation(g.program, 'resolution'), gl.canvas.width, gl.canvas.width);
+        gl.uniform1i(gl.getUniformLocation(g.program, 'tex'), 0);
+        gl.uniform1i(gl.getUniformLocation(g.program, 'highQuality'), isFinalFrame);
+
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        
+        if (!isFinalFrame) {
+          window.requestAnimationFrame(draw);
+        } else g.drawing = false;
+      }
+
+      function beginDraw({check=true} = {}) {
+        if (check) resize();
+        g.startTime = Date.now();
+        if (!g.drawing) {
+          g.drawing = true;
+          window.requestAnimationFrame(draw);
+        }
+      }
+
+      init();
+
+      function getMousePosition(e) {
+        var rect = e.target.getBoundingClientRect();
+        var x = 2 * ((e.clientX - rect.left) / (rect.right - rect.left) - 0.5);
+        var y = 2 * -((e.clientY - rect.top) / (rect.bottom - rect.top) - 0.5);
+        return [x, y];
+      }
+
+      function resize({correction=false, enableFast=false} = {}) {
+        if (enableFast && g.fastRendering) return;
+
+        g.fastRendering = enableFast;
+        let multiplier = (correction ? window.devicePixelRatio : 1) / (enableFast ? 2 : 1);
+        canvas.width = Math.round(Math.min(window.innerWidth * multiplier, window.innerHeight * multiplier));
+        canvas.height = canvas.width;
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+      }
+
+      window.addEventListener('resize', ()=>{resize({enableFast:true});beginDraw(false);});
+
+      canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+
+        if (e.deltaY < 0 && zoomFactor < g.zoomRange[0]) return;
+
+        let change = e.deltaY * 0.001;
+
+        let oldZoomFactor = zoomFactor;
+        zoomFactor = Math.max(zoomFactor + change, g.zoomRange[0]);
+        proportion = 2**zoomFactor / 2**oldZoomFactor;
+
+        var [x, y] = getMousePosition(e);
+
+        point[0] += x * (proportion / 2 - 0.5) / 2**zoomFactor;
+        point[1] += y * (proportion / 2 - 0.5) / 2**zoomFactor;
+
+        beginDraw();
+      });
+
+      canvas.addEventListener('pointerdown', (e) => {
+        g.dragging = true;
+        [g.pointerX, g.pointerY] = getMousePosition(e);
+
+        beginDraw();
+      });
+      canvas.addEventListener('pointermove', (e) => {
+        if (!g.dragging) return;
+
+        var [x, y] = getMousePosition(e);
+
+        point[0] -= (x - g.pointerX) / 2**(zoomFactor + 1);
+        point[1] -= (y - g.pointerY) / 2**(zoomFactor + 1);
+
+        [g.pointerX, g.pointerY] = getMousePosition(e);
+
+        beginDraw();
+      });
+      window.addEventListener('pointerup', () => {
+        g.dragging = false;
+        beginDraw();
+      });
+    });
+  </script>
+
+</head>
+<body>
+  <div id="box-container">
+    <div id="inner-spacer">
+      <canvas width='1024' height='1024'></canvas>
+    </div>
+  </div>
+
+  <img id='texture' src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAgAAAAABCAYAAAHfvCbgAAADdUlEQVRIx22V2W4jOQxFD0lJtdhxOekeIMH8/9f1LLE7cVwuSZwHKUs35uHiXF5SBiQUYXl8fHRhQGRAZcbYoewx7lC5Q3wBXZCwQDxSh4U6Hcj7O/JhTznO5ONE+ZYoD5H6oPi9IEdH7wpxtzFMK+NwYZdeWezM0c58k2e+y4k/OHHgB4v/xeL/sNRnDuXELl+Yt5XheiO9ZcKlYC+OnEHOjjwLnCKcInIe4TzDywFe7+BlBz938LaDtz2sM9x2cBuhDFATlAA1IE9Pf7YHYMJk1x5A9ih3iB9QWUCPEBZ8WCjjQp0P7fKHHfl+Jt8P1G+J8mD4g+JH0KVi+0yabwzjG3N6ZR9feLAzR3nmu574zol7/mXhB0f/m2P9h0M9scsv7PIb07qSrhvxkrFXx372y5+AU4DngJyGdvmfM7y+P8AML3u47prWHawTlBFKghKhBnBDnp6eHAKC0RiBgJIQiQipeRIiCWFAfEAYQAaEEei0AXQEG/HQvIeBGkdqTPgw4ClRh0QZEnWM1DHiU6BOhk8Bn5UyGkxKnQVGwSdgbJLBkaFiqaKpojETQsFCJoSNaDeSbiS7McnKoCujXJlkZZYrE1cmubJnZWZl4MLIhYELExdGvzDwxuhXhnfVlVRXYt1INRNLJpRCyAXLFcsV3RzdCnoDuTmygtxAVocryApcBVZrvCpcDdaArI2sCW4JbhHWEbYBtgRrhC22/taVY2f3JULtzAG8feFUBTeoBq5NKLiAK/L4+OQi0kMFBJE+hCJiH4dEFCG0g2IIhrshoijWZ1suElqve7x/YGLgn/zICDihzUoAsc6WuQTQJhfrDGAB1KgSwAzXgEdrWei9YGCdQXEzPBgeFTfFo+FBISrVFKLgsTMoHoUaBIL0nuBBaLvS2K/yiyQ42BeaQ3BUHbWKmCNWEXVUK6oV0Ypq6XXBpKJSMK0EKZhkTApBMkFKE7nVZKIUAhtRCpGWpd5PH3XrRfpZbgRu2IffMDYiGfONwNbmvJON4AUlE7zlRiF4xrygXjEvmNfm61c6Wh2tBanv3pHqSAUp7yxI4YscuqeA5EZy7+XmP3oZyNJnrPnfVQSyIVm7Vyja5ov95ntdYlumYv1v5H9mq/36G/XLbNXPM9U+M9eWed+3j4XtLPq5wL8sMl9qgSqN77X3Gmmzv/n/ABK+2p+cInjTAAAAAElFTkSuQmCC' hidden>
+
+</body>
+</html>
